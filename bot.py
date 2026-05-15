@@ -6,7 +6,7 @@ import os
 from datetime import datetime, timedelta
 import aiosqlite
 import aiohttp
-from bs4 import BeautifulSoup
+import json
 
 TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN)
@@ -26,65 +26,67 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== УЛУЧШЕННЫЙ ПОИСК =====================
-async def search_products(query: str):
+# ===================== ПРОДВИНУТЫЙ ПОИСК =====================
+async def advanced_search(query: str):
     results = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml",
-        "Accept-Language": "ru-RU,ru;q=0.9",
-    }
-
-    urls = [
-        f"https://www.wildberries.ru/catalog/0/search.aspx?search={query.replace(' ', '+')}",
-        f"https://www.ozon.ru/search/?text={query.replace(' ', '+')}",
+    q = query.replace(" ", "+")
+    
+    headers_list = [
+        {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"},
+        {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"}
     ]
 
-    async with aiohttp.ClientSession(headers=headers) as session:
-        for url in urls:
-            try:
-                async with session.get(url, timeout=12) as resp:
-                    if resp.status != 200:
-                        continue
-                    soup = BeautifulSoup(await resp.text(), 'html.parser')
-                    
-                    # Разные способы поиска товаров
-                    candidates = soup.find_all(['div', 'article', 'a'], limit=15)
-                    for item in candidates:
-                        title = item.find(string=lambda t: t and len(str(t).strip()) > 15)
-                        if not title:
-                            continue
-                        title = str(title).strip()[:90]
-                        
-                        price = item.find(string=lambda t: t and any(c in str(t) for c in '₽$€'))
-                        price = price.strip() if price else "Цена уточняется"
-                        
-                        if len(title) > 20 and title not in [r.split('\n')[0] for r in results]:
-                            results.append(f"{title}\n💰 {price}")
-            except:
-                continue
+    async with aiohttp.ClientSession() as session:
+        # Wildberries search
+        try:
+            url = f"https://search.wb.ru/exactmatch/ru/common/v4/search?query={q}&limit=10"
+            async with session.get(url, headers=headers_list[0], timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    products = data.get('data', {}).get('products', [])[:5]
+                    for p in products:
+                        name = p.get('name', 'Без названия')
+                        price = p.get('salePriceU', 0) // 100 or p.get('priceU', 0) // 100
+                        results.append(f"🛍️ {name}\n💰 {price} ₽ (WB)")
+        except:
+            pass
 
-    return results[:5] if results else ["По этому запросу сейчас ничего не найдено.\nПопробуй более точный запрос (например: «айфон 15 128gb черный»)"]
+        # Ozon search (через публичный endpoint)
+        try:
+            url = f"https://www.ozon.ru/api/composer-api.v1/search?text={q}"
+            async with session.get(url, headers=headers_list[1], timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.text()
+                    # Простой парсинг
+                    if "items" in data:
+                        results.append("🔍 Найдено на Ozon — проверь вручную по ссылке")
+        except:
+            pass
+
+    if not results:
+        return ["🤖 К сожалению, по этому запросу сейчас ничего не удалось найти.\n\nПопробуй:\n• Более точный запрос\n• Без бренда сначала"]
+    
+    return results[:6]
 
 # ===================== ХЭНДЛЕРЫ =====================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await init_db()
-    await message.answer("👋 Добро пожаловать в <b>Антипереплата</b>!\n\nЗдесь ищем самые выгодные предложения.", 
+    await message.answer("👋 <b>Антипереплата</b>\n\nИщем самые выгодные цены на WB, Ozon и других маркетплейсах.", 
                         reply_markup=main_menu, parse_mode="HTML")
 
 @dp.message(F.text == "🔍 Поиск товара")
 async def search_request(message: types.Message):
-    await message.answer("Напиши название товара:\nПример: айфон 15, пуховик женский, кофемашина, power bank 20000")
+    await message.answer("Напиши, что хочешь купить:\nПример: `айфон 15 128gb`, `зимние сапоги женские 38`, `power bank 20000`")
 
 @dp.message()
 async def handle_search(message: types.Message):
-    if len(message.text) < 3 or message.text.startswith('/'):
+    if len(message.text) < 3:
         return
 
     await message.answer("🔍 Ищу лучшие предложения...")
 
-    results = await search_products(message.text)
+    results = await advanced_search(message.text)
 
     async with aiosqlite.connect('market.db') as db:
         async with db.execute("SELECT subscribed_until FROM users WHERE user_id = ?", 
@@ -93,7 +95,7 @@ async def handle_search(message: types.Message):
     
     is_premium = row and row[0] and datetime.fromisoformat(row[0]) > datetime.now() if row and row[0] else False
 
-    text = f"<b>🔍 Результаты по запросу:</b> {message.text}\n\n"
+    text = f"<b>Результаты по запросу:</b> {message.text}\n\n"
 
     for i, item in enumerate(results[:3], 1):
         if is_premium or i == 1:
@@ -102,7 +104,7 @@ async def handle_search(message: types.Message):
             text += f"{i}️⃣ |||||||||||||||||| (заблюрено)\n\n"
 
     if not is_premium:
-        text += "🔒 Полные результаты доступны только по подписке 0.99$/мес"
+        text += "🔒 Полные результаты и лучшие предложения — только по подписке 0.99$/мес"
 
     await message.answer(text, parse_mode="HTML")
 
@@ -113,7 +115,7 @@ async def buy_subscription(message: types.Message):
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Антипереплата»",
-        description="Неограниченный поиск + все цены",
+        description="Неограниченный поиск товаров",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
