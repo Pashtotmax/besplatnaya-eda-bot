@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 import re
 
 TOKEN = os.getenv("TOKEN")
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -20,16 +21,19 @@ async def init_db():
                            (user_id INTEGER PRIMARY KEY, subscribed_until TEXT)''')
         await db.commit()
 
-main_menu = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="🔍 Новый поиск")],
-    [KeyboardButton(text="👤 Моя подписка")],
-    [KeyboardButton(text="💎 Купить подписку 0.99$")],
-], resize_keyboard=True)
+main_menu = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔍 Новый поиск")],
+        [KeyboardButton(text="👤 Моя подписка")],
+        [KeyboardButton(text="💎 Купить подписку 0.99$")],
+    ],
+    resize_keyboard=True
+)
 
-# ===================== САМЫЙ СИЛЬНЫЙ ПАРСЕР =====================
+# ===================== ПАРСЕР =====================
 async def parse_product_info(url: str):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "Accept-Language": "ru-RU,ru;q=0.9",
     }
     
@@ -44,61 +48,30 @@ async def parse_product_info(url: str):
                 
                 title = None
 
-                # === Максимально агрессивный поиск названия ===
                 if "wildberries" in url:
-                    # 1. JSON в script (самый точный)
                     for script in soup.find_all('script'):
-                        if not script.string or len(script.string) < 300:
-                            continue
-                        content = script.string
-                        
-                        # Основные варианты ключей
-                        for pattern in [
-                            r'"name"\s*:\s*"([^"]+)"',
-                            r'"title"\s*:\s*"([^"]+)"',
-                            r'"productName"\s*:\s*"([^"]+)"',
-                            r'"shortName"\s*:\s*"([^"]+)"'
-                        ]:
-                            match = re.search(pattern, content)
-                            if match:
-                                candidate = match.group(1).strip()
-                                if len(candidate) > 15 and not any(x in candidate.lower() for x in ["wildberries", "интернет-магазин", "скидки"]):
-                                    title = candidate
-                                    break
-                        if title:
-                            break
+                        if script.string and len(script.string) > 300:
+                            for pattern in [r'"name"\s*:\s*"([^"]+)"', r'"title"\s*:\s*"([^"]+)"']:
+                                match = re.search(pattern, script.string)
+                                if match:
+                                    candidate = match.group(1).strip()
+                                    if len(candidate) > 15 and "wildberries" not in candidate.lower():
+                                        title = candidate
+                                        break
+                            if title:
+                                break
 
-                    # 2. og:title
                     if not title:
                         meta = soup.find("meta", property="og:title")
                         if meta and meta.get("content"):
-                            title = meta["content"].split(" — ")[0].split(" | ")[0].strip()
-
-                    # 3. h1
-                    if not title or len(title) < 20:
-                        h1 = soup.find("h1")
-                        if h1:
-                            title = h1.get_text(strip=True)
-
-                # Ozon
-                elif "ozon.ru" in url:
-                    h1 = soup.find("h1")
-                    if h1:
-                        title = h1.get_text(strip=True)
+                            title = meta["content"].split(" — ")[0].strip()
 
                 if title:
                     title = re.sub(r'\s+', ' ', title).strip()[:160]
                 
-                # Цена (запасной)
-                price = None
-                price_match = re.search(r'(\d{4,6})\s*[₽]', html)
-                if price_match:
-                    price = int(price_match.group(1))
+                return title, None
                 
-                return title, price
-                
-        except Exception as e:
-            print(f"Parse error: {e}")
+        except:
             return None, None
 
 
@@ -121,7 +94,7 @@ async def search_cheapest_alternatives(query: str):
                     title_tag = card.find('a', {'data-auto': 'title'})
                     price_tag = card.find('span', {'data-auto': 'price-value'})
                     if title_tag and price_tag:
-                        title = title_tag.get_text(strip=True)[:85]
+                        title = title_tag.get_text(strip=True)[:90]
                         price_text = re.sub(r'\D', '', price_tag.get_text(strip=True))
                         price = int(price_text) if price_text.isdigit() else None
                         link = "https://market.yandex.ru" + title_tag.get('href', '')
@@ -156,23 +129,55 @@ async def handle_product_link(message: types.Message):
     
     title, current_price = await parse_product_info(url)
     
-    if not title or len(title) < 15 or "wildberries" in title.lower():
-        return await message.answer(
-            "❌ Не удалось извлечь название товара.\n\n"
-            "Попробуй другую ссылку на **конкретный товар**."
-        )
+    if not title or len(title) < 15:
+        return await message.answer("❌ Не удалось извлечь название товара.\nПопробуй другую ссылку.")
 
     await message.answer(f"✅ Нашёл:\n<b>{title}</b>\n\n🔎 Ищу лучшие цены...", parse_mode="HTML")
     
     alternatives = await search_cheapest_alternatives(title)
     
     if not alternatives:
-        return await message.answer("Не удалось найти альтернативы. Попробуй другой товар.")
+        return await message.answer("Не удалось найти варианты. Попробуй позже.")
 
     text = f"💰 Лучшие цены на «<b>{title}</b>»:\n\n"
-    
     for i, alt in enumerate(alternatives, 1):
         text += f"{i}️⃣ <b>{alt['price']} ₽</b> — <a href='{alt['link']}'>{alt['title']}</a>\n\n"
 
-    if current_price:
-        text += f"\nПо
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ===================== ПОДПИСКА =====================
+@dp.message(F.text == "💎 Купить подписку 0.99$")
+async def buy_subscription(message: types.Message):
+    prices = [types.LabeledPrice(label="Подписка 30 дней", amount=99)]
+    await bot.send_invoice(
+        chat_id=message.chat.id,
+        title="CheapFinder Premium",
+        description="Безлимитные поиски",
+        payload="monthly_sub",
+        provider_token="",
+        currency="XTR",
+        prices=prices
+    )
+
+@dp.pre_checkout_query()
+async def pre_checkout(query: types.PreCheckoutQuery):
+    await query.answer(ok=True)
+
+@dp.message(F.successful_payment)
+async def successful_payment(message: types.Message):
+    until = (datetime.now() + timedelta(days=30)).isoformat()
+    async with aiosqlite.connect('price_bot.db') as db:
+        await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)",
+                        (message.from_user.id, until))
+        await db.commit()
+    await message.answer("🎉 Подписка активирована!")
+
+# ===================== ЗАПУСК =====================
+async def main():
+    await init_db()
+    print("🚀 CheapFinder Bot успешно запущен!")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
