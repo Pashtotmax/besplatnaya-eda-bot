@@ -27,7 +27,7 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== АКЦИИ (с разделением по странам) =====================
+# ===================== АКЦИИ =====================
 async def get_deals(country: str = "Россия", is_premium: bool = False):
     date = datetime.now().strftime('%d.%m.%Y')
     
@@ -60,10 +60,11 @@ async def get_deals(country: str = "Россия", is_premium: bool = False):
     else:
         return header + free + "\n\n🔒 <i>Полный список акций доступен только по подписке 0.99$/мес</i>"
 
-# ===================== ПОДПИСКА =====================
+# ===================== ПОДПИСКА (ИСПРАВЛЕНО) =====================
 @dp.message(F.text == "💎 Купить подписку 0.99$")
 async def buy_subscription(message: types.Message):
     prices = [types.LabeledPrice(label="Подписка 30 дней", amount=99)]
+    
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Бесплатная Еда»",
@@ -71,8 +72,8 @@ async def buy_subscription(message: types.Message):
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
-        prices=prices,
-        is_subscription=True
+        prices=prices
+        # is_subscription=True — убрано, чтобы не было ошибки
     )
 
 @dp.pre_checkout_query()
