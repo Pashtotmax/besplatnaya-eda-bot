@@ -34,24 +34,29 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== ПАРСИНГ =====================
+# ===================== МНОГОИСТОЧНИКОВЫЙ ПАРСИНГ =====================
 async def parse_new_deals():
     today = datetime.now().strftime('%Y-%m-%d')
-    sources = ["https://pepper.ru/"]
+    sources = [
+        "https://pepper.ru/",
+        "https://edadeal.ru/",
+        "https://berikod.ru/food/",
+    ]
 
     async with aiohttp.ClientSession() as session:
         for url in sources:
             try:
-                async with session.get(url, timeout=10) as resp:
+                async with session.get(url, timeout=12) as resp:
                     if resp.status == 200:
                         soup = BeautifulSoup(await resp.text(), 'html.parser')
-                        items = soup.find_all('div', class_='thread')[:15]
+                        items = soup.find_all(['div', 'article'], class_=lambda x: x and ('thread' in x or 'product' in x or 'offer' in x))[:20]
+                        
                         async with aiosqlite.connect('food_bot.db') as db:
                             for item in items:
-                                title = item.find('a', class_='cept-tt')
+                                title = item.find(['a', 'h2', 'div'], class_=lambda x: x and any(word in str(x).lower() for word in ['title', 'name', 'text', 'cept']))
                                 if title:
                                     text = title.get_text(strip=True)
-                                    if len(text) > 20:
+                                    if len(text) > 25:
                                         await db.execute(
                                             "INSERT OR IGNORE INTO deals (country, text, timestamp) VALUES (?, ?, ?)",
                                             ("Россия", text[:220], today)
@@ -62,15 +67,15 @@ async def parse_new_deals():
 # ===================== ОТПРАВКА АКЦИЙ =====================
 async def send_deals(user_id: int, country: str, is_premium: bool):
     async with aiosqlite.connect('food_bot.db') as db:
-        async with db.execute("SELECT text FROM deals WHERE country = ? ORDER BY id DESC LIMIT 15", 
+        async with db.execute("SELECT text FROM deals WHERE country = ? ORDER BY id DESC LIMIT 20", 
                             (country,)) as cursor:
             rows = await cursor.fetchall()
 
     if not rows:
-        await bot.send_message(user_id, "Пока нет акций. Бот ищет...")
+        await bot.send_message(user_id, "⚠️ Пока не найдено свежих акций.\nБот продолжает поиск...")
         return
 
-    text = f"<b>🔥 Актуальные акции — {datetime.now().strftime('%d.%m.%Y')}</b>\n\n"
+    text = f"<b>🔥 Реальные акции — {datetime.now().strftime('%d.%m.%Y')}</b>\n\n"
     count = len(rows) if is_premium else 4
 
     for i, (deal,) in enumerate(rows[:count], 1):
@@ -80,7 +85,7 @@ async def send_deals(user_id: int, country: str, is_premium: bool):
             text += f"{i}️⃣ |||||||||||||||||| (заблюрено)\n"
 
     if not is_premium:
-        text += "\n\n🔒 Остальные 11 акций доступны только по подписке 0.99$/мес"
+        text += "\n\n🔒 Остальные акции доступны только по подписке 0.99$/мес"
 
     await bot.send_message(user_id, text, parse_mode="HTML")
 
@@ -88,7 +93,7 @@ async def send_deals(user_id: int, country: str, is_premium: bool):
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await init_db()
-    await message.answer("👋 Добро пожаловать в <b>Бесплатная Еда</b>!\nРеальные акции каждый день.", 
+    await message.answer("👋 Добро пожаловать в <b>Бесплатная Еда</b>!\nТолько реальные акции.", 
                         reply_markup=main_menu, parse_mode="HTML")
 
 @dp.message(F.text == "🔥 Акции на сегодня")
@@ -129,7 +134,7 @@ async def buy_subscription(message: types.Message):
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Бесплатная Еда»",
-        description="Полный доступ ко всем акциям без цензуры",
+        description="Полный доступ ко всем реальным акциям",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -147,19 +152,19 @@ async def successful_payment(message: types.Message):
         await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)", 
                         (message.from_user.id, until))
         await db.commit()
-    await message.answer("🎉 Подписка активирована!\nТеперь ты видишь **все** акции без цензуры.")
+    await message.answer("🎉 Подписка активирована!\nТеперь ты видишь **все** реальные акции без цензуры.")
 
 # ===================== ФОНОВЫЙ ПОИСК =====================
 async def background_search():
     while True:
         await parse_new_deals()
-        await asyncio.sleep(1200)  # каждые 20 минут
+        await asyncio.sleep(900)  # каждые 15 минут
 
 # ===================== ЗАПУСК =====================
 async def main():
     await init_db()
     asyncio.create_task(background_search())
-    print("🚀 Бот запущен! Ищет новые акции каждые 20 минут.")
+    print("🚀 Бот запущен! Только реальный парсинг.")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
