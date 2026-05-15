@@ -21,7 +21,6 @@ async def init_db():
                             subscribed_until TEXT)''')
         await db.commit()
 
-# ===================== МЕНЮ =====================
 main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🔥 Акции на сегодня")],
     [KeyboardButton(text="🌍 Выбрать страну")],
@@ -29,49 +28,58 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== РЕАЛЬНЫЙ ПАРСИНГ =====================
-async def get_deals(country: str = "Россия", is_premium: bool = False):
+# ===================== ПАРСИНГ =====================
+async def get_real_deals(country: str = "Россия", is_premium: bool = False):
     date = datetime.now().strftime('%d.%m.%Y')
     header = f"<b>🔥 Актуальные акции — {date}</b>\n\n"
-    deals_text = ""
+    
+    raw_deals = []
 
-    # Попытка парсинга
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get("https://pepper.ru/", timeout=10) as resp:
                 if resp.status == 200:
                     soup = BeautifulSoup(await resp.text(), 'html.parser')
-                    items = soup.find_all('div', class_='thread')[:10]
-                    if items:
-                        deals_text += "✅ Свежие акции с Pepper.ru:\n\n"
-                        for item in items[:7 if is_premium else 3]:
-                            title = item.find('a', class_='cept-tt')
-                            if title:
-                                text = title.get_text(strip=True)
-                                deals_text += f"• {text[:100]}...\n"
+                    items = soup.find_all('div', class_='thread')[:12]
+                    for item in items:
+                        title = item.find('a', class_='cept-tt')
+                        if title:
+                            raw_deals.append(title.get_text(strip=True))
     except:
-        deals_text += "⚠️ Не удалось загрузить самые свежие акции с сайта.\n"
+        pass
 
-    # Fallback — надёжные акции
-    if len(deals_text) < 100:
+    # Если парсинг не сработал — используем проверенные
+    if not raw_deals:
         if country == "Россия":
-            deals_text += """
-1️⃣ Яндекс Еда — промокоды до -500₽
-2️⃣ Самокат — скидки 30-50% на первый заказ
-3️⃣ Додо Пицца — комбо дня
-4️⃣ Пятёрочка / Магнит — каталог недели
-"""
+            raw_deals = [
+                "Яндекс Еда — промокод до -500₽ на первый заказ",
+                "Самокат — скидки 30-50% на первый заказ",
+                "Додо Пицца — комбо от 399₽",
+                "Пятёрочка — 3 по цене 2 на многие товары",
+                "KFC — стрипсы + картошка выгодно",
+                "ВкусВилл — скидки на ЗОЖ продукты"
+            ]
         else:
-            deals_text += """
-1️⃣ Яндекс Еда — скидки в Минске и регионах
-2️⃣ Евроопт — акции недели
-3️⃣ KFC — комбо
-"""
+            raw_deals = [
+                "Яндекс Еда Беларусь — скидки до 40%",
+                "Евроопт — акции недели",
+                "KFC Минск — комбо по выгодной цене",
+                "Виталюр — свежие скидки",
+                "Самокат Беларусь — первый заказ дешевле"
+            ]
 
-    if is_premium:
-        return header + deals_text
-    else:
-        return header + deals_text[:450] + "\n\n🔒 Полный и актуальный список акций доступен только по подписке 0.99$/мес"
+    # Формируем текст
+    text = header
+    for i, deal in enumerate(raw_deals, 1):
+        if is_premium or i == 4:   # 4-я акция всегда видна
+            text += f"{i}️⃣ {deal}\n"
+        else:
+            text += f"{i}️⃣ |||||||||||||||||||| (заблюрено)\n"
+
+    if not is_premium:
+        text += "\n\n🔒 Остальные акции доступны только по подписке 0.99$/мес"
+
+    return text
 
 # ===================== ПОДПИСКА =====================
 @dp.message(F.text == "💎 Купить подписку 0.99$")
@@ -80,7 +88,7 @@ async def buy_subscription(message: types.Message):
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Бесплатная Еда»",
-        description="Ежедневные реальные акции России и Беларуси",
+        description="Полный доступ ко всем актуальным акциям",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -98,7 +106,7 @@ async def successful_payment(message: types.Message):
         await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)", 
                         (message.from_user.id, until))
         await db.commit()
-    await message.answer("🎉 Подписка активирована!\nТеперь ты получаешь полный список акций каждый день.")
+    await message.answer("🎉 Подписка активирована!\nТеперь ты видишь **все** акции без цензуры.")
 
 # ===================== ОСНОВНЫЕ ФУНКЦИИ =====================
 @dp.message(Command("start"))
@@ -142,7 +150,7 @@ async def choose_country(message: types.Message):
         [InlineKeyboardButton(text="🇷🇺 Россия", callback_data="country_Russia")],
         [InlineKeyboardButton(text="🇧🇾 Беларусь", callback_data="country_Belarus")],
     ])
-    await message.answer("Выбери страну для акций:", reply_markup=kb)
+    await message.answer("Выбери страну:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("country_"))
 async def set_country(callback: types.CallbackQuery):
