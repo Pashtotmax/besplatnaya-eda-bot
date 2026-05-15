@@ -1,124 +1,152 @@
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import os
-import aiohttp
-from bs4 import BeautifulSoup
-import re
+from datetime import datetime
+import aiosqlite
+import random
 
 TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🔍 Новый поиск")],
-        [KeyboardButton(text="💎 Купить подписку 0.99$")],
-    ],
-    resize_keyboard=True
-)
+# ===================== БАЗА ДАННЫХ =====================
+async def init_db():
+    async with aiosqlite.connect('horoscope.db') as db:
+        await db.execute('''CREATE TABLE IF NOT EXISTS users 
+                           (user_id INTEGER PRIMARY KEY, 
+                            zodiac TEXT,
+                            subscribed_until TEXT)''')
+        await db.commit()
 
-async def search_cheapest(query: str):
-    # Улучшенный поиск — несколько попыток
-    queries = [
-        query,
-        query.replace("детский", "").replace("детская", "").strip(),
-        query.replace("флисовый", "").replace("флис", "").strip(),
+main_menu = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text="🌟 Мой гороскоп на сегодня")],
+    [KeyboardButton(text="♈ Выбрать знак зодиака")],
+    [KeyboardButton(text="👤 Моя подписка")],
+    [KeyboardButton(text="💎 Купить подписку 0.99$")],
+], resize_keyboard=True)
+
+zodiac_list = {
+    "♈ Овен": "Овен", "♉ Телец": "Телец", "♊ Близнецы": "Близнецы",
+    "♋ Рак": "Рак", "♌ Лев": "Лев", "♍ Дева": "Дева",
+    "♎ Весы": "Весы", "♏ Скорпион": "Скорпион", "♐ Стрелец": "Стрелец",
+    "♑ Козерог": "Козерог", "♒ Водолей": "Водолей", "♓ Рыбы": "Рыбы"
+}
+
+# ===================== ГЕНЕРАЦИЯ ГОРОСКОПА =====================
+def generate_horoscope(zodiac: str, is_premium: bool = False):
+    date = datetime.now().strftime('%d.%m.%Y')
+    base = f"<b>🌟 Гороскоп на {date} — {zodiac}</b>\n\n"
+    
+    common = [
+        "Сегодня звёзды благоприятствуют новым начинаниям.",
+        "Будьте внимательны к своему окружению.",
+        "Финансовая сфера требует осторожности.",
+        "В любви возможны приятные сюрпризы.",
+        "Здоровье на высоте, но не забывайте про отдых."
     ]
     
-    results = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    premium = [
+        "Сегодня отличный день для важных решений и крупных покупок.",
+        "Вам откроются скрытые возможности, которых не видели раньше.",
+        "В личной жизни возможен серьёзный прорыв.",
+        "Финансовый поток усиливается — действуйте смело."
+    ]
     
-    async with aiohttp.ClientSession(headers=headers) as session:
-        for q in queries:
-            if not q or len(q) < 3:
-                continue
-                
-            try:
-                url = f"https://market.yandex.ru/search?text={q.replace(' ', '+')}&how=aprice&cvredirect=3"
-                async with session.get(url, timeout=20) as resp:
-                    soup = BeautifulSoup(await resp.text(), 'html.parser')
-                    
-                    cards = soup.find_all('div', {'data-auto': True})
-                    
-                    for card in cards[:8]:
-                        try:
-                            title_tag = card.find('a', {'data-auto': 'title'})
-                            price_tag = card.find('span', {'data-auto': 'price-value'})
-                            
-                            if title_tag and price_tag:
-                                title = title_tag.get_text(strip=True)[:95]
-                                price_text = re.sub(r'\D', '', price_tag.get_text(strip=True))
-                                price = int(price_text) if price_text.isdigit() else None
-                                
-                                if price and price > 150:
-                                    link = "https://market.yandex.ru" + title_tag.get('href', '')
-                                    results.append({"title": title, "price": price, "link": link})
-                        except:
-                            continue
-            except:
-                continue
-                
-    # Убираем дубликаты
-    seen = set()
-    unique_results = []
-    for item in results:
-        if item['title'] not in seen:
-            seen.add(item['title'])
-            unique_results.append(item)
+    text = base
+    for phrase in common:
+        text += f"• {phrase}\n"
     
-    unique_results.sort(key=lambda x: x["price"])
-    return unique_results[:7]
+    if is_premium:
+        text += "\n" + "\n".join([f"✨ {p}" for p in premium])
+        text += "\n\n🌟 Полный персональный прогноз доступен только по подписке."
+    
+    return text
 
-
+# ===================== ХЭНДЛЕРЫ =====================
 @dp.message(Command("start"))
 async def start(message: types.Message):
+    await init_db()
     await message.answer(
-        "👋 <b>CheapFinder</b>\n\n"
-        "Напиши название товара — найду самые низкие цены на Яндекс.Маркете.",
-        reply_markup=main_menu, 
-        parse_mode="HTML"
+        "👋 Добро пожаловать в <b>Твой Личный Гороскоп</b>!\n\n"
+        "Каждый день — персональный прогноз от звёзд.", 
+        reply_markup=main_menu, parse_mode="HTML"
     )
 
-@dp.message(F.text == "🔍 Новый поиск")
-async def new_search(message: types.Message):
-    await message.answer("Напиши название товара (можно с брендом):")
+@dp.message(F.text == "🌟 Мой гороскоп на сегодня")
+async def my_horoscope(message: types.Message):
+    async with aiosqlite.connect('horoscope.db') as db:
+        async with db.execute("SELECT zodiac, subscribed_until FROM users WHERE user_id = ?", 
+                            (message.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            
+            if not row or not row[0]:
+                await message.answer("Сначала выбери свой знак зодиака 👇", reply_markup=main_menu)
+                return
+                
+            zodiac = row[0]
+            is_premium = row[1] and datetime.fromisoformat(row[1]) > datetime.now()
+            
+            horoscope = generate_horoscope(zodiac, is_premium)
+            await message.answer(horoscope, parse_mode="HTML")
 
-@dp.message()
-async def handle_message(message: types.Message):
-    text = message.text.strip()
-    if len(text) < 3 or text in ["💎 Купить подписку 0.99$", "/start"]:
-        return
+@dp.message(F.text == "♈ Выбрать знак зодиака")
+async def choose_zodiac(message: types.Message):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="♈ Овен", callback_data="zodiac_Овен")],
+        [InlineKeyboardButton(text="♉ Телец", callback_data="zodiac_Телец")],
+        [InlineKeyboardButton(text="♊ Близнецы", callback_data="zodiac_Близнецы")],
+        [InlineKeyboardButton(text="♋ Рак", callback_data="zodiac_Рак")],
+        [InlineKeyboardButton(text="♌ Лев", callback_data="zodiac_Лев")],
+        [InlineKeyboardButton(text="♍ Дева", callback_data="zodiac_Дева")],
+        [InlineKeyboardButton(text="♎ Весы", callback_data="zodiac_Весы")],
+        [InlineKeyboardButton(text="♏ Скорпион", callback_data="zodiac_Скорпион")],
+        [InlineKeyboardButton(text="♐ Стрелец", callback_data="zodiac_Стрелец")],
+        [InlineKeyboardButton(text="♑ Козерог", callback_data="zodiac_Козерог")],
+        [InlineKeyboardButton(text="♒ Водолей", callback_data="zodiac_Водолей")],
+        [InlineKeyboardButton(text="♓ Рыбы", callback_data="zodiac_Рыбы")],
+    ])
+    await message.answer("Выбери свой знак зодиака:", reply_markup=kb)
 
-    await message.answer(f"🔍 Ищу лучшие цены на:\n<b>{text}</b>", parse_mode="HTML")
+@dp.callback_query(F.data.startswith("zodiac_"))
+async def set_zodiac(callback: types.CallbackQuery):
+    zodiac = callback.data.split("_")[1]
+    async with aiosqlite.connect('horoscope.db') as db:
+        await db.execute("INSERT OR REPLACE INTO users (user_id, zodiac) VALUES (?, ?)", 
+                        (callback.from_user.id, zodiac))
+        await db.commit()
     
-    results = await search_cheapest(text)
+    await callback.message.edit_text(f"✅ Твой знак зодиака: <b>{zodiac}</b>", parse_mode="HTML")
+    await callback.answer()
     
-    if not results:
-        return await message.answer(
-            "😕 Ничего не нашёл.\n\n"
-            "Советы:\n"
-            "• Добавь бренд (Zara, Nike, Ozon и т.д.)\n"
-            "• Напиши короче\n"
-            "• Убери слова «детский», «мужской»"
-        )
+    # Сразу показываем гороскоп
+    horoscope = generate_horoscope(zodiac, False)
+    await callback.message.answer(horoscope, parse_mode="HTML")
 
-    response = f"💰 Лучшие цены на «{text}»:\n\n"
-    for i, item in enumerate(results, 1):
-        response += f"{i}️⃣ <b>{item['price']} ₽</b> — <a href='{item['link']}'>{item['title']}</a>\n\n"
+@dp.message(F.text == "👤 Моя подписка")
+async def my_sub(message: types.Message):
+    async with aiosqlite.connect('horoscope.db') as db:
+        async with db.execute("SELECT subscribed_until FROM users WHERE user_id = ?", 
+                            (message.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                until = datetime.fromisoformat(row[0])
+                if until > datetime.now():
+                    days = (until - datetime.now()).days
+                    await message.answer(f"✅ Подписка активна!\nОсталось: <b>{days} дней</b>", parse_mode="HTML")
+                else:
+                    await message.answer("❌ Подписка истекла.")
+            else:
+                await message.answer("❌ У тебя нет активной подписки.")
 
-    await message.answer(response, parse_mode="HTML", disable_web_page_preview=True)
-
-
-# Подписка
 @dp.message(F.text == "💎 Купить подписку 0.99$")
 async def buy_subscription(message: types.Message):
     prices = [types.LabeledPrice(label="Подписка 30 дней", amount=99)]
     await bot.send_invoice(
         chat_id=message.chat.id,
-        title="CheapFinder Premium",
-        description="Больше результатов + приоритет",
+        title="Подписка «Твой Личный Гороскоп»",
+        description="Персональные прогнозы + расширенный анализ каждый день",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -131,10 +159,17 @@ async def pre_checkout(query: types.PreCheckoutQuery):
 
 @dp.message(F.successful_payment)
 async def successful_payment(message: types.Message):
-    await message.answer("🎉 Подписка активирована! Теперь ищи без ограничений.")
+    until = (datetime.now() + timedelta(days=30)).isoformat()
+    async with aiosqlite.connect('horoscope.db') as db:
+        await db.execute("UPDATE users SET subscribed_until = ? WHERE user_id = ?", 
+                        (until, message.from_user.id))
+        await db.commit()
+    await message.answer("🎉 Подписка активирована!\nТеперь ты получаешь полный персональный гороскоп каждый день.")
 
+# ===================== ЗАПУСК =====================
 async def main():
-    print("🚀 CheapFinder Bot v2 (улучшенный поиск)")
+    await init_db()
+    print("🚀 Бот «Твой Личный Гороскоп» запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
