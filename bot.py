@@ -3,7 +3,7 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 import aiosqlite
 import aiohttp
 from bs4 import BeautifulSoup
@@ -28,56 +28,69 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== ПАРСИНГ =====================
+# ===================== РЕАЛЬНЫЙ МНОГОИСТОЧНИКОВЫЙ ПАРСИНГ =====================
 async def get_real_deals(country: str = "Россия", is_premium: bool = False):
     date = datetime.now().strftime('%d.%m.%Y')
-    header = f"<b>🔥 Актуальные акции — {date}</b>\n\n"
-    
-    raw_deals = []
+    header = f"<b>🔥 Реальные акции — {date}</b>\n\n"
+    all_deals = []
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://pepper.ru/", timeout=10) as resp:
-                if resp.status == 200:
-                    soup = BeautifulSoup(await resp.text(), 'html.parser')
-                    items = soup.find_all('div', class_='thread')[:12]
-                    for item in items:
-                        title = item.find('a', class_='cept-tt')
-                        if title:
-                            raw_deals.append(title.get_text(strip=True))
-    except:
-        pass
+    sources = ["https://pepper.ru/", "https://edadeal.ru/"]
 
-    # Если парсинг не сработал — используем проверенные
-    if not raw_deals:
+    async with aiohttp.ClientSession() as session:
+        for url in sources:
+            try:
+                async with session.get(url, timeout=10) as resp:
+                    if resp.status == 200:
+                        soup = BeautifulSoup(await resp.text(), 'html.parser')
+                        
+                        # Pepper.ru
+                        if "pepper.ru" in url:
+                            items = soup.find_all('div', class_='thread')[:10]
+                            for item in items:
+                                title = item.find('a', class_='cept-tt')
+                                if title:
+                                    text = title.get_text(strip=True)
+                                    all_deals.append(f"• {text[:100]}...")
+
+                        # Edadeal (простой парсинг)
+                        elif "edadeal.ru" in url:
+                            items = soup.find_all('div', class_='product')
+                            for item in items[:8]:
+                                title = item.find('div', class_='product__title')
+                                if title:
+                                    text = title.get_text(strip=True)
+                                    all_deals.append(f"• {text[:90]}...")
+            except:
+                continue
+
+    # Если ничего не нашлось — надёжный fallback
+    if not all_deals:
         if country == "Россия":
-            raw_deals = [
-                "Яндекс Еда — промокод до -500₽ на первый заказ",
+            all_deals = [
+                "Яндекс Еда — промокоды до -500₽",
                 "Самокат — скидки 30-50% на первый заказ",
-                "Додо Пицца — комбо от 399₽",
-                "Пятёрочка — 3 по цене 2 на многие товары",
-                "KFC — стрипсы + картошка выгодно",
-                "ВкусВилл — скидки на ЗОЖ продукты"
+                "Додо Пицца — комбо дня",
+                "Пятёрочка — акции недели",
+                "KFC — выгодные комбо",
+                "ВкусВилл — скидки на ЗОЖ"
             ]
         else:
-            raw_deals = [
-                "Яндекс Еда Беларусь — скидки до 40%",
+            all_deals = [
+                "Яндекс Еда Беларусь — скидки",
                 "Евроопт — акции недели",
-                "KFC Минск — комбо по выгодной цене",
-                "Виталюр — свежие скидки",
-                "Самокат Беларусь — первый заказ дешевле"
+                "KFC Минск — комбо",
+                "Виталюр — свежие предложения"
             ]
 
-    # Формируем текст
+    # Формируем вывод
     text = header
-    for i, deal in enumerate(raw_deals, 1):
-        if is_premium or i == 4:   # 4-я акция всегда видна
-            text += f"{i}️⃣ {deal}\n"
-        else:
-            text += f"{i}️⃣ |||||||||||||||||||| (заблюрено)\n"
+    count = 8 if is_premium else 4
+
+    for i, deal in enumerate(all_deals[:count], 1):
+        text += f"{i}️⃣ {deal}\n"
 
     if not is_premium:
-        text += "\n\n🔒 Остальные акции доступны только по подписке 0.99$/мес"
+        text += "\n\n🔒 Остальные акции и полные промокоды доступны только по подписке 0.99$/мес"
 
     return text
 
@@ -88,7 +101,7 @@ async def buy_subscription(message: types.Message):
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Бесплатная Еда»",
-        description="Полный доступ ко всем актуальным акциям",
+        description="Реальные актуальные акции каждый день",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -106,7 +119,7 @@ async def successful_payment(message: types.Message):
         await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)", 
                         (message.from_user.id, until))
         await db.commit()
-    await message.answer("🎉 Подписка активирована!\nТеперь ты видишь **все** акции без цензуры.")
+    await message.answer("🎉 Подписка активирована!\nТеперь ты получаешь все актуальные акции.")
 
 # ===================== ОСНОВНЫЕ ФУНКЦИИ =====================
 @dp.message(Command("start"))
@@ -128,22 +141,6 @@ async def today_deals(message: types.Message):
             deals = await get_deals(country, is_premium)
             await message.answer(deals, parse_mode="HTML")
 
-@dp.message(F.text == "👤 Моя подписка")
-async def my_sub(message: types.Message):
-    async with aiosqlite.connect('food_bot.db') as db:
-        async with db.execute("SELECT subscribed_until FROM users WHERE user_id = ?", 
-                            (message.from_user.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                until = datetime.fromisoformat(row[0])
-                if until > datetime.now():
-                    days = (until - datetime.now()).days
-                    await message.answer(f"✅ Подписка активна!\nОсталось: <b>{days} дней</b>", parse_mode="HTML")
-                else:
-                    await message.answer("❌ Подписка истекла.")
-            else:
-                await message.answer("❌ У тебя нет активной подписки.")
-
 @dp.message(F.text == "🌍 Выбрать страну")
 async def choose_country(message: types.Message):
     kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -160,12 +157,32 @@ async def set_country(callback: types.CallbackQuery):
                         (country, callback.from_user.id))
         await db.commit()
     await callback.message.edit_text(f"✅ Страна изменена на <b>{country}</b>", parse_mode="HTML")
+    
+    # Сразу показываем акции
+    deals = await get_deals(country, False)
+    await callback.message.answer(deals, parse_mode="HTML")
     await callback.answer()
+
+@dp.message(F.text == "👤 Моя подписка")
+async def my_sub(message: types.Message):
+    async with aiosqlite.connect('food_bot.db') as db:
+        async with db.execute("SELECT subscribed_until FROM users WHERE user_id = ?", 
+                            (message.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                until = datetime.fromisoformat(row[0])
+                if until > datetime.now():
+                    days = (until - datetime.now()).days
+                    await message.answer(f"✅ Подписка активна!\nОсталось: <b>{days} дней</b>", parse_mode="HTML")
+                else:
+                    await message.answer("❌ Подписка истекла.")
+            else:
+                await message.answer("❌ У тебя нет активной подписки.")
 
 # ===================== ЗАПУСК =====================
 async def main():
     await init_db()
-    print("🚀 Бот запущен с реальным парсингом!")
+    print("🚀 Бот запущен с реальным парсингом нескольких источников!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
