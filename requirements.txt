@@ -1,4 +1,4 @@
-aiogram==3.13.0
+aiogram
 aiosqlite
-aiohttp
 beautifulsoup4
+aiohttp
