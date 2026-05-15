@@ -3,9 +3,8 @@ from aiogram.filters import Command
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 import asyncio
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import aiosqlite
-import random
 
 TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN)
@@ -13,140 +12,102 @@ dp = Dispatcher()
 
 # ===================== БАЗА ДАННЫХ =====================
 async def init_db():
-    async with aiosqlite.connect('horoscope.db') as db:
+    async with aiosqlite.connect('habits.db') as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS users 
                            (user_id INTEGER PRIMARY KEY, 
-                            zodiac TEXT,
                             subscribed_until TEXT)''')
+        await db.execute('''CREATE TABLE IF NOT EXISTS habits 
+                           (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            user_id INTEGER,
+                            name TEXT,
+                            streak INTEGER DEFAULT 0,
+                            last_done TEXT)''')
         await db.commit()
 
 main_menu = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="🌟 Мой гороскоп на сегодня")],
-    [KeyboardButton(text="♈ Выбрать знак зодиака")],
+    [KeyboardButton(text="✅ Отметить привычки")],
+    [KeyboardButton(text="📊 Мои привычки")],
+    [KeyboardButton(text="➕ Добавить привычку")],
     [KeyboardButton(text="👤 Моя подписка")],
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-zodiac_list = {
-    "♈ Овен": "Овен", "♉ Телец": "Телец", "♊ Близнецы": "Близнецы",
-    "♋ Рак": "Рак", "♌ Лев": "Лев", "♍ Дева": "Дева",
-    "♎ Весы": "Весы", "♏ Скорпион": "Скорпион", "♐ Стрелец": "Стрелец",
-    "♑ Козерог": "Козерог", "♒ Водолей": "Водолей", "♓ Рыбы": "Рыбы"
-}
-
-# ===================== ГЕНЕРАЦИЯ ГОРОСКОПА =====================
-def generate_horoscope(zodiac: str, is_premium: bool = False):
-    date = datetime.now().strftime('%d.%m.%Y')
-    base = f"<b>🌟 Гороскоп на {date} — {zodiac}</b>\n\n"
-    
-    common = [
-        "Сегодня звёзды благоприятствуют новым начинаниям.",
-        "Будьте внимательны к своему окружению.",
-        "Финансовая сфера требует осторожности.",
-        "В любви возможны приятные сюрпризы.",
-        "Здоровье на высоте, но не забывайте про отдых."
-    ]
-    
-    premium = [
-        "Сегодня отличный день для важных решений и крупных покупок.",
-        "Вам откроются скрытые возможности, которых не видели раньше.",
-        "В личной жизни возможен серьёзный прорыв.",
-        "Финансовый поток усиливается — действуйте смело."
-    ]
-    
-    text = base
-    for phrase in common:
-        text += f"• {phrase}\n"
-    
-    if is_premium:
-        text += "\n" + "\n".join([f"✨ {p}" for p in premium])
-        text += "\n\n🌟 Полный персональный прогноз доступен только по подписке."
-    
-    return text
+# ===================== ФУНКЦИИ =====================
+async def get_user_habits(user_id: int):
+    async with aiosqlite.connect('habits.db') as db:
+        async with db.execute("SELECT id, name, streak FROM habits WHERE user_id = ? ORDER BY streak DESC", 
+                            (user_id,)) as cursor:
+            return await cursor.fetchall()
 
 # ===================== ХЭНДЛЕРЫ =====================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await init_db()
     await message.answer(
-        "👋 Добро пожаловать в <b>Твой Личный Гороскоп</b>!\n\n"
-        "Каждый день — персональный прогноз от звёзд.", 
+        "👋 Добро пожаловать в <b>Привычки 2.0</b>!\n\n"
+        "Здесь ты будешь формировать полезные привычки и видеть свой прогресс.\n\n"
+        "Начни с добавления первой привычки 👇",
         reply_markup=main_menu, parse_mode="HTML"
     )
 
-@dp.message(F.text == "🌟 Мой гороскоп на сегодня")
-async def my_horoscope(message: types.Message):
-    async with aiosqlite.connect('horoscope.db') as db:
-        async with db.execute("SELECT zodiac, subscribed_until FROM users WHERE user_id = ?", 
-                            (message.from_user.id,)) as cursor:
-            row = await cursor.fetchone()
-            
-            if not row or not row[0]:
-                await message.answer("Сначала выбери свой знак зодиака 👇", reply_markup=main_menu)
-                return
-                
-            zodiac = row[0]
-            is_premium = row[1] and datetime.fromisoformat(row[1]) > datetime.now()
-            
-            horoscope = generate_horoscope(zodiac, is_premium)
-            await message.answer(horoscope, parse_mode="HTML")
+@dp.message(F.text == "➕ Добавить привычку")
+async def add_habit(message: types.Message):
+    await message.answer("Напиши название новой привычки (например: «Пить 2 литра воды», «Читать 20 страниц», «Спорт 30 минут»):")
+    # В реальной версии здесь можно использовать FSM, но для простоты — следующий шаг вручную
 
-@dp.message(F.text == "♈ Выбрать знак зодиака")
-async def choose_zodiac(message: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="♈ Овен", callback_data="zodiac_Овен")],
-        [InlineKeyboardButton(text="♉ Телец", callback_data="zodiac_Телец")],
-        [InlineKeyboardButton(text="♊ Близнецы", callback_data="zodiac_Близнецы")],
-        [InlineKeyboardButton(text="♋ Рак", callback_data="zodiac_Рак")],
-        [InlineKeyboardButton(text="♌ Лев", callback_data="zodiac_Лев")],
-        [InlineKeyboardButton(text="♍ Дева", callback_data="zodiac_Дева")],
-        [InlineKeyboardButton(text="♎ Весы", callback_data="zodiac_Весы")],
-        [InlineKeyboardButton(text="♏ Скорпион", callback_data="zodiac_Скорпион")],
-        [InlineKeyboardButton(text="♐ Стрелец", callback_data="zodiac_Стрелец")],
-        [InlineKeyboardButton(text="♑ Козерог", callback_data="zodiac_Козерог")],
-        [InlineKeyboardButton(text="♒ Водолей", callback_data="zodiac_Водолей")],
-        [InlineKeyboardButton(text="♓ Рыбы", callback_data="zodiac_Рыбы")],
-    ])
-    await message.answer("Выбери свой знак зодиака:", reply_markup=kb)
-
-@dp.callback_query(F.data.startswith("zodiac_"))
-async def set_zodiac(callback: types.CallbackQuery):
-    zodiac = callback.data.split("_")[1]
-    async with aiosqlite.connect('horoscope.db') as db:
-        await db.execute("INSERT OR REPLACE INTO users (user_id, zodiac) VALUES (?, ?)", 
-                        (callback.from_user.id, zodiac))
+@dp.message(F.text.startswith("Привычка:") or len(F.text) > 3)  # упрощённо
+async def save_habit(message: types.Message):
+    habit_name = message.text.strip()
+    async with aiosqlite.connect('habits.db') as db:
+        await db.execute("INSERT INTO habits (user_id, name) VALUES (?, ?)", 
+                        (message.from_user.id, habit_name))
         await db.commit()
-    
-    await callback.message.edit_text(f"✅ Твой знак зодиака: <b>{zodiac}</b>", parse_mode="HTML")
-    await callback.answer()
-    
-    # Сразу показываем гороскоп
-    horoscope = generate_horoscope(zodiac, False)
-    await callback.message.answer(horoscope, parse_mode="HTML")
+    await message.answer(f"✅ Привычка «{habit_name}» добавлена!\n\nОтмечай её каждый день.")
 
-@dp.message(F.text == "👤 Моя подписка")
-async def my_sub(message: types.Message):
-    async with aiosqlite.connect('horoscope.db') as db:
-        async with db.execute("SELECT subscribed_until FROM users WHERE user_id = ?", 
-                            (message.from_user.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                until = datetime.fromisoformat(row[0])
-                if until > datetime.now():
-                    days = (until - datetime.now()).days
-                    await message.answer(f"✅ Подписка активна!\nОсталось: <b>{days} дней</b>", parse_mode="HTML")
-                else:
-                    await message.answer("❌ Подписка истекла.")
-            else:
-                await message.answer("❌ У тебя нет активной подписки.")
+@dp.message(F.text == "✅ Отметить привычки")
+async def mark_habits(message: types.Message):
+    habits = await get_user_habits(message.from_user.id)
+    if not habits:
+        await message.answer("У тебя пока нет привычек. Добавь первую!")
+        return
 
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"✅ {name} (+{streak})", callback_data=f"done_{id}")] 
+        for id, name, streak in habits
+    ])
+    await message.answer("Какие привычки выполнил сегодня?", reply_markup=kb)
+
+@dp.callback_query(F.data.startswith("done_"))
+async def habit_done(callback: types.CallbackQuery):
+    habit_id = int(callback.data.split("_")[1])
+    async with aiosqlite.connect('habits.db') as db:
+        await db.execute("UPDATE habits SET streak = streak + 1, last_done = ? WHERE id = ?", 
+                        (datetime.now().isoformat(), habit_id))
+        await db.commit()
+    await callback.answer("✅ +1 к цепочке!")
+    await callback.message.edit_text("Отлично! Продолжай в том же духе 🔥")
+
+@dp.message(F.text == "📊 Мои привычки")
+async def show_stats(message: types.Message):
+    habits = await get_user_habits(message.from_user.id)
+    if not habits:
+        await message.answer("У тебя пока нет привычек.")
+        return
+
+    text = "<b>📊 Твой прогресс:</b>\n\n"
+    for _, name, streak in habits:
+        text += f"• {name} — <b>{streak} дней подряд</b>\n"
+    
+    await message.answer(text, parse_mode="HTML")
+
+# ===================== ПОДПИСКА =====================
 @dp.message(F.text == "💎 Купить подписку 0.99$")
 async def buy_subscription(message: types.Message):
     prices = [types.LabeledPrice(label="Подписка 30 дней", amount=99)]
     await bot.send_invoice(
         chat_id=message.chat.id,
-        title="Подписка «Твой Личный Гороскоп»",
-        description="Персональные прогнозы + расширенный анализ каждый день",
+        title="Подписка «Привычки 2.0»",
+        description="Неограниченное количество привычек + статистика + напоминания",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -160,16 +121,28 @@ async def pre_checkout(query: types.PreCheckoutQuery):
 @dp.message(F.successful_payment)
 async def successful_payment(message: types.Message):
     until = (datetime.now() + timedelta(days=30)).isoformat()
-    async with aiosqlite.connect('horoscope.db') as db:
+    async with aiosqlite.connect('habits.db') as db:
         await db.execute("UPDATE users SET subscribed_until = ? WHERE user_id = ?", 
                         (until, message.from_user.id))
         await db.commit()
-    await message.answer("🎉 Подписка активирована!\nТеперь ты получаешь полный персональный гороскоп каждый день.")
+    await message.answer("🎉 Подписка активирована!\nТеперь ты можешь отслеживать сколько угодно привычек.")
+
+@dp.message(F.text == "👤 Моя подписка")
+async def my_sub(message: types.Message):
+    async with aiosqlite.connect('habits.db') as db:
+        async with db.execute("SELECT subscribed_until FROM users WHERE user_id = ?", 
+                            (message.from_user.id,)) as cursor:
+            row = await cursor.fetchone()
+            if row and row[0]:
+                days = (datetime.fromisoformat(row[0]) - datetime.now()).days
+                await message.answer(f"✅ Подписка активна!\nОсталось: <b>{days} дней</b>", parse_mode="HTML")
+            else:
+                await message.answer("❌ Подписки нет. Оформи за 0.99$")
 
 # ===================== ЗАПУСК =====================
 async def main():
     await init_db()
-    print("🚀 Бот «Твой Личный Гороскоп» запущен!")
+    print("🚀 Бот «Привычки 2.0» запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
