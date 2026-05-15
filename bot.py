@@ -18,83 +18,121 @@ async def init_db():
     async with aiosqlite.connect('price_bot.db') as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS users
                            (user_id INTEGER PRIMARY KEY,
-                            subscribed_until TEXT,
-                            max_searches INTEGER DEFAULT 5)''')  # лимит поисков в день для бесплатных
+                            subscribed_until TEXT)''')
         await db.commit()
 
 main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🔍 Новый поиск")],
-    [KeyboardButton(text="📊 Мои поиски")],
     [KeyboardButton(text="👤 Моя подписка")],
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== ПАРСИНГ ТОВАРА =====================
+# ===================== УЛУЧШЕННЫЙ ПАРСЕР =====================
 async def parse_product_info(url: str):
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+        "Accept-Language": "ru-RU,ru;q=0.9"
+    }
+    
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            async with session.get(url, timeout=15) as resp:
+            async with session.get(url, timeout=20) as resp:
                 if resp.status != 200:
                     return None, None
                 
-                soup = BeautifulSoup(await resp.text(), 'html.parser')
+                html = await resp.text()
+                soup = BeautifulSoup(html, 'html.parser')
+                
                 title = None
                 price = None
-                image = None
 
-                if "wildberries.ru" in url:
-                    title_tag = soup.find("h1") or soup.find("span", {"data-link": "text__title"})
-                    price_tag = soup.find("span", class_=re.compile("price__wrap|final-price"))
-                    if title_tag: title = title_tag.get_text(strip=True)[:120]
-                    if price_tag:
-                        price_text = re.sub(r'\D', '', price_tag.get_text(strip=True))
-                        price = int(price_text) if price_text.isdigit() else None
+                # === Wildberries (ru + by) ===
+                if "wildberries" in url:
+                    # Несколько возможных селекторов
+                    title_selectors = [
+                        "h1", 
+                        "span[data-link='text__title']",
+                        "meta[property='og:title']",
+                        "[class*='title'] h1"
+                    ]
+                    
+                    for sel in title_selectors:
+                        tag = soup.select_one(sel)
+                        if tag:
+                            title = tag.get_text(strip=True) or tag.get("content")
+                            if title and len(title) > 5:
+                                break
+                    
+                    # Цена
+                    price_selectors = [
+                        "span.price__wrap", 
+                        "span.final-price",
+                        "[class*='price'] span",
+                        "meta[property='product:price:amount']"
+                    ]
+                    
+                    for sel in price_selectors:
+                        tag = soup.select_one(sel)
+                        if tag:
+                            text = tag.get_text(strip=True) or tag.get("content")
+                            if text:
+                                price_text = re.sub(r'\D', '', text)
+                                if price_text.isdigit():
+                                    price = int(price_text)
+                                    break
 
+                # === Ozon ===
                 elif "ozon.ru" in url:
                     title_tag = soup.find("h1")
-                    if title_tag: title = title_tag.get_text(strip=True)[:120]
+                    if title_tag:
+                        title = title_tag.get_text(strip=True)[:150]
+                    
+                    price_tag = soup.find("span", string=re.compile(r'\d+'))
+                    if price_tag:
+                        price_text = re.sub(r'\D', '', price_tag.get_text())
+                        price = int(price_text) if price_text else None
 
+                # Обрезаем слишком длинное название
+                if title:
+                    title = title.strip()[:140]
+                    
                 return title, price
-        except:
+                
+        except Exception as e:
+            print(f"Parse error for {url}: {e}")
             return None, None
 
-# ===================== ПОИСК ДЕШЕВЫХ АЛЬТЕРНАТИВ =====================
+# ===================== ПОИСК АЛЬТЕРНАТИВ =====================
 async def search_cheapest_alternatives(query: str):
-    """Ищем на Yandex.Market + прямые ссылки"""
+    if not query:
+        return []
+    
     results = []
-    search_url = f"https://market.yandex.ru/search?text={query.replace(' ', '+')}"
+    search_url = f"https://market.yandex.ru/search?text={query.replace(' ', '+')}&how=aprice"
     
     headers = {"User-Agent": "Mozilla/5.0"}
     async with aiohttp.ClientSession(headers=headers) as session:
         try:
-            async with session.get(search_url, timeout=20) as resp:
+            async with session.get(search_url, timeout=25) as resp:
                 soup = BeautifulSoup(await resp.text(), 'html.parser')
                 
-                # Ищем карточки товаров
-                items = soup.find_all('div', {'data-auto': 'offer'})[:6]  # топ-6
+                cards = soup.find_all('div', {'data-auto': lambda x: x and 'offer' in x.lower()})[:7]
                 
-                for item in items:
-                    title_tag = item.find('a', {'data-auto': 'title'})
-                    price_tag = item.find('span', {'data-auto': 'price-value'})
-                    link_tag = title_tag
+                for card in cards:
+                    title_tag = card.find('a', {'data-auto': 'title'})
+                    price_tag = card.find('span', {'data-auto': 'price-value'})
                     
                     if title_tag and price_tag:
                         title = title_tag.get_text(strip=True)[:100]
                         price_text = re.sub(r'\D', '', price_tag.get_text(strip=True))
-                        price = int(price_text) if price_text else None
+                        price = int(price_text) if price_text.isdigit() else None
                         link = "https://market.yandex.ru" + title_tag.get('href', '')
                         
-                        if price:
-                            results.append({
-                                "title": title,
-                                "price": price,
-                                "link": link
-                            })
-        except Exception as e:
-            print(f"Search error: {e}")
+                        if price and title:
+                            results.append({"title": title, "price": price, "link": link})
+        except:
+            pass
     
-    # Сортируем по цене
     results.sort(key=lambda x: x["price"])
     return results[:5]
 
@@ -104,7 +142,7 @@ async def start(message: types.Message):
     await init_db()
     await message.answer(
         "👋 Добро пожаловать в <b>CheapFinder</b>!\n\n"
-        "Кидай ссылку на товар с WB или Ozon — найду где дешевле!",
+        "Отправь ссылку на товар с Wildberries или Ozon — найду, где можно купить дешевле.",
         reply_markup=main_menu, 
         parse_mode="HTML"
     )
@@ -117,35 +155,38 @@ async def new_search(message: types.Message):
 async def handle_product_link(message: types.Message):
     url = message.text.strip()
     
+    await message.answer("🔍 Получаю информацию о товаре...")
+    
     title, current_price = await parse_product_info(url)
+    
     if not title:
-        return await message.answer("❌ Не удалось прочитать товар. Попробуй другую ссылку.")
+        return await message.answer("❌ Не удалось прочитать товар.\n\nПопробуй другую ссылку или убедись, что она открывается в браузере.")
 
-    await message.answer(f"🔍 Ищу лучшие цены на:\n<b>{title}</b>", parse_mode="HTML")
+    await message.answer(f"✅ Товар найден:\n<b>{title}</b>\n\n🔎 Ищу самые выгодные предложения...", parse_mode="HTML")
     
     alternatives = await search_cheapest_alternatives(title)
     
     if not alternatives:
-        return await message.answer("Не удалось найти альтернативы. Попробуй позже.")
+        return await message.answer("Не удалось найти альтернативы. Попробуй позже или другой товар.")
 
-    text = f"✅ Найдено {len(alternatives)} вариантов дешевле/лучше:\n\n"
+    text = f"💰 Самые выгодные варианты на <b>{title}</b>:\n\n"
     
     for i, alt in enumerate(alternatives, 1):
-        text += f"{i}. <b>{alt['price']} ₽</b> — <a href='{alt['link']}'>{alt['title'][:70]}...</a>\n\n"
+        text += f"{i}️⃣ <b>{alt['price']} ₽</b> — <a href='{alt['link']}'>{alt['title']}</a>\n\n"
     
     if current_price:
-        text += f"\nТекущая цена в источнике: {current_price} ₽"
-    
+        text += f"Текущая цена по твоей ссылке: <b>{current_price} ₽</b>"
+
     await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
 
-# ===================== ПОДПИСКА (оставляем) =====================
+# ===================== ПОДПИСКА =====================
 @dp.message(F.text == "💎 Купить подписку 0.99$")
 async def buy_subscription(message: types.Message):
     prices = [types.LabeledPrice(label="Подписка 30 дней", amount=99)]
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="CheapFinder Premium",
-        description="Безлимитные поиски + больше площадок",
+        description="Безлимит + расширенный поиск по площадкам",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -165,10 +206,9 @@ async def successful_payment(message: types.Message):
         await db.commit()
     await message.answer("🎉 Подписка активирована! Теперь без ограничений.")
 
-# ===================== ЗАПУСК =====================
 async def main():
     await init_db()
-    print("🚀 CheapFinder Bot запущен! (поиск самых дешёвых аналогов)")
+    print("🚀 CheapFinder Bot запущен — улучшенный парсер!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
