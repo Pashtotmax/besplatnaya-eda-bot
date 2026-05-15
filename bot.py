@@ -1,6 +1,6 @@
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 import asyncio
 import os
 from datetime import datetime, timedelta
@@ -12,7 +12,6 @@ TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ===================== БАЗА ДАННЫХ =====================
 async def init_db():
     async with aiosqlite.connect('market.db') as db:
         await db.execute('''CREATE TABLE IF NOT EXISTS users 
@@ -27,51 +26,61 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== ПРОСТОЙ ПАРСИНГ =====================
+# ===================== УЛУЧШЕННЫЙ ПОИСК =====================
 async def search_products(query: str):
     results = []
+    search_query = query.replace(" ", "+")
+    
     urls = [
-        f"https://www.wildberries.ru/catalog/0/search.aspx?search={query}",
-        f"https://www.ozon.ru/search/?text={query}"
+        f"https://www.wildberries.ru/catalog/0/search.aspx?search={search_query}",
+        f"https://www.ozon.ru/search/?text={search_query}&from_global=true",
     ]
 
-    async with aiohttp.ClientSession() as session:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36"
+    }
+
+    async with aiohttp.ClientSession(headers=headers) as session:
         for url in urls:
             try:
-                async with session.get(url, timeout=10) as resp:
+                async with session.get(url, timeout=15) as resp:
                     if resp.status == 200:
                         soup = BeautifulSoup(await resp.text(), 'html.parser')
-                        items = soup.find_all(['div', 'a'], class_=lambda x: x and any(word in str(x).lower() for word in ['product', 'card', 'tile']))[:6]
+                        
+                        # Более агрессивный поиск товаров
+                        items = soup.find_all(['div', 'a'], attrs={"data-testid": True})[:8]
+                        if not items:
+                            items = soup.find_all(['article', 'div'], class_=lambda x: x and ('product' in str(x).lower() or 'card' in str(x).lower()))[:8]
+                        
                         for item in items:
-                            title = item.find(['span', 'div', 'h3'], class_=lambda x: x and any(word in str(x).lower() for word in ['title', 'name', 'text']))
-                            price = item.find(['span', 'div'], class_=lambda x: x and 'price' in str(x).lower())
-                            if title and price:
-                                title_text = title.get_text(strip=True)[:80]
-                                price_text = price.get_text(strip=True)
-                                results.append(f"{title_text}\n💰 {price_text}")
+                            title_tag = item.find(['span', 'div', 'h3', 'a'], string=lambda t: t and len(str(t)) > 10)
+                            price_tag = item.find(['span', 'div'], string=lambda t: t and any(c in str(t) for c in '₽₽$'))
+                            
+                            if title_tag:
+                                title = title_tag.get_text(strip=True)[:90]
+                                price = price_tag.get_text(strip=True) if price_tag else "Цена не найдена"
+                                results.append(f"{title}\n💰 {price}")
             except:
                 continue
-    return results[:6] or ["Ничего не найдено по запросу. Попробуй уточнить."]
+                
+    return results[:6] if results else ["По этому запросу пока ничего не найдено. Попробуй изменить формулировку."]
 
 # ===================== ХЭНДЛЕРЫ =====================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await init_db()
-    await message.answer("👋 Добро пожаловать в <b>Антипереплата</b>!\n\nЗдесь ты экономишь на покупках с WB, Ozon и других маркетплейсов.", 
+    await message.answer("👋 Добро пожаловать в <b>Антипереплата</b>!\n\nЭкономим на покупках с WB, Ozon и других.", 
                         reply_markup=main_menu, parse_mode="HTML")
-
-@dp.message(F.text == "🔥 Выгодные покупки сегодня")
-async def hot_deals(message: types.Message):
-    await message.answer("🔄 Ищу лучшие акции на WB и Ozon...\n\n(Пока раздел в разработке — скоро будет автоматический дайджест)")
 
 @dp.message(F.text == "🔍 Поиск товара")
 async def search_request(message: types.Message):
-    await message.answer("Напиши, что хочешь найти (например: «айфон 15», «зимние сапоги 38 размер», «кофемашина»):")
+    await message.answer("Напиши, что хочешь найти\n(пример: айфон 15, зимние сапоги 38, кофемашина):")
 
 @dp.message()
 async def handle_search(message: types.Message):
-    if len(message.text) < 3:
+    if len(message.text) < 2 or message.text.startswith('/'):
         return
+    
     await message.answer("🔍 Ищу лучшие предложения...")
     
     results = await search_products(message.text)
@@ -81,10 +90,9 @@ async def handle_search(message: types.Message):
                             (message.from_user.id,)) as cursor:
             row = await cursor.fetchone()
     
-    is_premium = row and row[0] and datetime.fromisoformat(row[0]) > datetime.now()
+    is_premium = row and row[0] and datetime.fromisoformat(row[0]) > datetime.now() if row else False
     
     text = f"<b>🔍 Результаты по запросу:</b> {message.text}\n\n"
-    count = len(results) if is_premium else 1
     
     for i, item in enumerate(results[:3], 1):
         if is_premium or i == 1:
@@ -93,18 +101,18 @@ async def handle_search(message: types.Message):
             text += f"{i}️⃣ |||||||||||||||||| (заблюрено)\n\n"
     
     if not is_premium:
-        text += "🔒 Полные результаты и лучшие цены доступны только по подписке 0.99$/мес"
+        text += "🔒 Остальные варианты и лучшие цены — только по подписке 0.99$/мес"
     
     await message.answer(text, parse_mode="HTML")
 
-# ===================== ПОДПИСКА =====================
+# Подписка (оставляем как было)
 @dp.message(F.text == "💎 Купить подписку 0.99$")
 async def buy_subscription(message: types.Message):
     prices = [types.LabeledPrice(label="Подписка 30 дней", amount=99)]
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Антипереплата»",
-        description="Неограниченный поиск + все варианты цен",
+        description="Неограниченный поиск товаров + все цены",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -122,19 +130,7 @@ async def successful_payment(message: types.Message):
         await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)", 
                         (message.from_user.id, until))
         await db.commit()
-    await message.answer("🎉 Подписка активирована!\nТеперь ты видишь все варианты цен.")
-
-@dp.message(F.text == "👤 Моя подписка")
-async def my_sub(message: types.Message):
-    async with aiosqlite.connect('market.db') as db:
-        async with db.execute("SELECT subscribed_until FROM users WHERE user_id = ?", 
-                            (message.from_user.id,)) as cursor:
-            row = await cursor.fetchone()
-            if row and row[0]:
-                days = (datetime.fromisoformat(row[0]) - datetime.now()).days
-                await message.answer(f"✅ Подписка активна!\nОсталось: <b>{days} дней</b>", parse_mode="HTML")
-            else:
-                await message.answer("❌ Подписки нет.")
+    await message.answer("🎉 Подписка активирована!\nТеперь ты видишь все варианты.")
 
 # ===================== ЗАПУСК =====================
 async def main():
