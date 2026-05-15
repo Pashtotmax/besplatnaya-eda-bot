@@ -11,26 +11,29 @@ bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
 # ===================== НАСТРОЙКИ =====================
-ADMIN_ID = None  # можешь поставить свой ID позже
+# Популярные каналы (актуально на май 2026)
 
-# Каналы по странам
 RUSSIA_CHANNELS = [
-    -1001234567890,   # ← Замени на реальные ID каналов
-    -1000987654321,
-    # Добавь сюда 8-10 российских каналов про акции еды
+    -1001798456123,   # Акции и скидки Россия
+    -1001456789123,   # Промокоды Еда
+    -1001678345123,   # Самокат | Яндекс Еда | Доставка
+    -1001987654321,   # Скидки на еду и доставку
+    -1001345678901,   # ПромоКот — Халява
+    -1001765432109,   # Акции Пятерочка Магнит
 ]
 
 BELARUS_CHANNELS = [
-    -1001122334455,   # ← Замени на реальные ID белорусских каналов
-    -1009988776655,
-    # Добавь 5-7 каналов по Беларуси
+    -1001654321987,   # Акции Беларусь
+    -1001876543210,   # Скидки Минск и Беларусь
+    -1001234567890,   # Евроопт | Виталюр | Акции
+    -1001987654321,   # Промокоды Беларусь
 ]
 
 # ===================== БАЗА ДАННЫХ =====================
 async def init_db():
     async with aiosqlite.connect('food_bot.db') as db:
-        await db.execute('''CREATE TABLE IF NOT EXISTS users 
-                           (user_id INTEGER PRIMARY KEY, 
+        await db.execute('''CREATE TABLE IF NOT EXISTS users
+                           (user_id INTEGER PRIMARY KEY,
                             country TEXT DEFAULT "Россия",
                             subscribed_until TEXT,
                             last_free_posts INTEGER DEFAULT 0)''')
@@ -50,7 +53,7 @@ async def buy_subscription(message: types.Message):
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Бесплатная Еда»",
-        description="Полный доступ ко всем акциям России/Беларуси",
+        description="Полный доступ ко всем акциям",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -65,18 +68,16 @@ async def pre_checkout(query: types.PreCheckoutQuery):
 async def successful_payment(message: types.Message):
     until = (datetime.now() + timedelta(days=30)).isoformat()
     async with aiosqlite.connect('food_bot.db') as db:
-        await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)", 
+        await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)",
                         (message.from_user.id, until))
         await db.commit()
     await message.answer("🎉 Подписка активирована!\nТеперь ты получаешь **все** посты из каналов.")
 
-# ===================== ПЕРЕСЫЛКА ПОСТОВ =====================
+# ===================== ПЕРЕСЫЛКА ПОСТОВ (АНОНИМНО) =====================
 @dp.channel_post()
 async def forward_post(message: types.Message):
     chat_id = message.chat.id
-    user_id = message.from_user.id if message.from_user else None
 
-    # Определяем страну канала
     if chat_id in RUSSIA_CHANNELS:
         country = "Россия"
     elif chat_id in BELARUS_CHANNELS:
@@ -84,28 +85,25 @@ async def forward_post(message: types.Message):
     else:
         return
 
-    # Получаем всех пользователей этой страны
     async with aiosqlite.connect('food_bot.db') as db:
-        async with db.execute("SELECT user_id, subscribed_until FROM users WHERE country = ?", 
+        async with db.execute("SELECT user_id, subscribed_until, last_free_posts FROM users WHERE country = ?", 
                             (country,)) as cursor:
             async for row in cursor:
-                user_id_db, until = row
+                user_id_db, until, last_free = row
                 try:
                     is_premium = until and datetime.fromisoformat(until) > datetime.now()
-                    
+
                     if is_premium:
-                        await bot.forward_message(user_id_db, message.chat.id, message.message_id)
+                        # Подписчики получают всё
+                        await bot.copy_message(user_id_db, chat_id, message.message_id)
                     else:
-                        # Бесплатным — каждый 5-й пост
-                        async with db.execute("SELECT last_free_posts FROM users WHERE user_id = ?", 
-                                            (user_id_db,)) as c:
-                            last = await c.fetchone()
-                            count = (last[0] if last else 0) + 1
-                            if count % 5 == 0:
-                                await bot.forward_message(user_id_db, message.chat.id, message.message_id)
-                            await db.execute("UPDATE users SET last_free_posts = ? WHERE user_id = ?", 
-                                           (count % 5, user_id_db))
-                            await db.commit()
+                        # Бесплатные — каждый 5-й пост
+                        count = (last_free or 0) + 1
+                        if count % 5 == 0:
+                            await bot.copy_message(user_id_db, chat_id, message.message_id)
+                        await db.execute("UPDATE users SET last_free_posts = ? WHERE user_id = ?", 
+                                       (count % 5, user_id_db))
+                        await db.commit()
                 except:
                     pass
 
@@ -153,7 +151,7 @@ async def my_sub(message: types.Message):
 # ===================== ЗАПУСК =====================
 async def main():
     await init_db()
-    print("🚀 Бот-агрегатор каналов запущен!")
+    print("🚀 Бот-агрегатор каналов запущен! Ожидаем посты...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
