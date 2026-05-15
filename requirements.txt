@@ -1,4 +1,3 @@
 aiogram
-aiosqlite
-beautifulsoup4
 aiohttp
+beautifulsoup4
