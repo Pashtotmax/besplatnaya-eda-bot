@@ -19,6 +19,7 @@ async def init_db():
                             subscribed_until TEXT)''')
         await db.commit()
 
+# ===================== МЕНЮ =====================
 main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="🔥 Акции на сегодня")],
     [KeyboardButton(text="🌍 Выбрать страну")],
@@ -26,38 +27,38 @@ main_menu = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== УЛУЧШЕННЫЕ АКЦИИ =====================
+# ===================== АКЦИИ (с разделением по странам) =====================
 async def get_deals(country: str = "Россия", is_premium: bool = False):
     date = datetime.now().strftime('%d.%m.%Y')
     
     if country == "Россия":
-        base = f"<b>🔥 Акции по России — {date}</b>\n\n"
+        header = f"<b>🔥 Акции по России — {date}</b>\n\n"
         free = """
 1️⃣ <b>Яндекс Еда</b> — до 400₽ на первый заказ (Москва, СПб, Екб и др.)
 2️⃣ <b>Самокат</b> — скидки 30% на первый заказ
-        """
+"""
         premium = """
-3️⃣ <b>Додо Пицца</b> — комбо за 399₽ (много городов)
-4️⃣ <b>Пятёрочка</b> — акции недели по всей стране
-5️⃣ <b>KFC</b> — стрипсы + картошка по суперцене
-6️⃣ <b>ВкусВилл</b> — скидки на здоровое питание
-        """
+3️⃣ <b>Додо Пицца</b> — комбо за 399₽
+4️⃣ <b>Пятёрочка / Магнит</b> — акции недели по всей стране
+5️⃣ <b>KFC, Burger King</b> — выгодные комбо
+6️⃣ <b>ВкусВилл</b> — скидки на ЗОЖ
+"""
     else:  # Беларусь
-        base = f"<b>🔥 Акции по Беларуси — {date}</b>\n\n"
+        header = f"<b>🔥 Акции по Беларуси — {date}</b>\n\n"
         free = """
-1️⃣ <b>Яндекс Еда</b> — скидки в Минске и Гомеле
-2️⃣ <b>Евроопт</b> — акции недели
-        """
+1️⃣ <b>Яндекс Еда</b> — скидки в Минске, Гомеле, Бресте
+2️⃣ <b>Евроопт</b> — акции недели по всей стране
+"""
         premium = """
 3️⃣ <b>Самокат</b> — скидки в Минске
-4️⃣ <b>KFC</b> — комбо в Минске и Бресте
-5️⃣ <b>Виталюр</b> — свежие акции
-        """
+4️⃣ <b>KFC</b> — комбо в крупных городах
+5️⃣ <b>Виталюр, Гиппо</b> — свежие предложения
+"""
 
     if is_premium:
-        return base + free + premium
+        return header + free + premium
     else:
-        return base + free + "\n\n🔒 <i>Ещё больше акций доступно только по подписке 0.99$/мес</i>"
+        return header + free + "\n\n🔒 <i>Полный список акций доступен только по подписке 0.99$/мес</i>"
 
 # ===================== ПОДПИСКА =====================
 @dp.message(F.text == "💎 Купить подписку 0.99$")
@@ -66,7 +67,7 @@ async def buy_subscription(message: types.Message):
     await bot.send_invoice(
         chat_id=message.chat.id,
         title="Подписка «Бесплатная Еда»",
-        description="Полный доступ к акциям России и Беларуси",
+        description="Ежедневные акции по России и Беларуси",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -85,13 +86,13 @@ async def successful_payment(message: types.Message):
         await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)", 
                         (message.from_user.id, until))
         await db.commit()
-    await message.answer("🎉 Подписка активирована!\nТеперь ты получаешь все акции ежедневно.")
+    await message.answer("🎉 Подписка активирована!\nТеперь ты получаешь полный список акций каждый день.")
 
-# ===================== ОСНОВНЫЕ КОМАНДЫ =====================
+# ===================== ОСНОВНЫЕ ФУНКЦИИ =====================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await init_db()
-    await message.answer("👋 Добро пожаловать в <b>Бесплатная Еда</b>!", 
+    await message.answer("👋 Добро пожаловать в <b>Бесплатная Еда</b>!\nАкции России и Беларуси.", 
                         reply_markup=main_menu, parse_mode="HTML")
 
 @dp.message(F.text == "🔥 Акции на сегодня")
@@ -106,8 +107,6 @@ async def today_deals(message: types.Message):
             
             deals = await get_deals(country, is_premium)
             await message.answer(deals, parse_mode="HTML")
-
-# (остальные функции — выбор страны, моя подписка — оставил без изменений)
 
 @dp.message(F.text == "👤 Моя подписка")
 async def my_sub(message: types.Message):
@@ -131,7 +130,7 @@ async def choose_country(message: types.Message):
         [InlineKeyboardButton(text="🇷🇺 Россия", callback_data="country_Russia")],
         [InlineKeyboardButton(text="🇧🇾 Беларусь", callback_data="country_Belarus")],
     ])
-    await message.answer("Выбери страну:", reply_markup=kb)
+    await message.answer("Выбери страну для акций:", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("country_"))
 async def set_country(callback: types.CallbackQuery):
