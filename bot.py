@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 import aiosqlite
 import aiohttp
 from bs4 import BeautifulSoup
+import re
 
 TOKEN = os.getenv("TOKEN")
 bot = Bot(token=TOKEN)
@@ -14,127 +15,137 @@ dp = Dispatcher()
 
 # ===================== БАЗА ДАННЫХ =====================
 async def init_db():
-    async with aiosqlite.connect('food_bot.db') as db:
-        await db.execute('''CREATE TABLE IF NOT EXISTS users 
-                           (user_id INTEGER PRIMARY KEY, 
-                            country TEXT DEFAULT "Россия",
+    async with aiosqlite.connect('price_bot.db') as db:
+        await db.execute('''CREATE TABLE IF NOT EXISTS users
+                           (user_id INTEGER PRIMARY KEY,
                             subscribed_until TEXT,
-                            last_free_count INTEGER DEFAULT 0)''')
-        await db.execute('''CREATE TABLE IF NOT EXISTS deals 
-                           (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                            country TEXT,
-                            text TEXT,
-                            timestamp TEXT)''')
+                            max_searches INTEGER DEFAULT 5)''')  # лимит поисков в день для бесплатных
         await db.commit()
 
 main_menu = ReplyKeyboardMarkup(keyboard=[
-    [KeyboardButton(text="🔥 Акции на сегодня")],
-    [KeyboardButton(text="🌍 Выбрать страну")],
+    [KeyboardButton(text="🔍 Новый поиск")],
+    [KeyboardButton(text="📊 Мои поиски")],
     [KeyboardButton(text="👤 Моя подписка")],
     [KeyboardButton(text="💎 Купить подписку 0.99$")],
 ], resize_keyboard=True)
 
-# ===================== МНОГОИСТОЧНИКОВЫЙ ПАРСИНГ =====================
-async def parse_new_deals():
-    today = datetime.now().strftime('%Y-%m-%d')
-    sources = [
-        "https://pepper.ru/",
-        "https://edadeal.ru/",
-        "https://berikod.ru/food/",
-    ]
+# ===================== ПАРСИНГ ТОВАРА =====================
+async def parse_product_info(url: str):
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.get(url, timeout=15) as resp:
+                if resp.status != 200:
+                    return None, None
+                
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
+                title = None
+                price = None
+                image = None
 
-    async with aiohttp.ClientSession() as session:
-        for url in sources:
-            try:
-                async with session.get(url, timeout=12) as resp:
-                    if resp.status == 200:
-                        soup = BeautifulSoup(await resp.text(), 'html.parser')
-                        items = soup.find_all(['div', 'article'], class_=lambda x: x and ('thread' in x or 'product' in x or 'offer' in x))[:20]
+                if "wildberries.ru" in url:
+                    title_tag = soup.find("h1") or soup.find("span", {"data-link": "text__title"})
+                    price_tag = soup.find("span", class_=re.compile("price__wrap|final-price"))
+                    if title_tag: title = title_tag.get_text(strip=True)[:120]
+                    if price_tag:
+                        price_text = re.sub(r'\D', '', price_tag.get_text(strip=True))
+                        price = int(price_text) if price_text.isdigit() else None
+
+                elif "ozon.ru" in url:
+                    title_tag = soup.find("h1")
+                    if title_tag: title = title_tag.get_text(strip=True)[:120]
+
+                return title, price
+        except:
+            return None, None
+
+# ===================== ПОИСК ДЕШЕВЫХ АЛЬТЕРНАТИВ =====================
+async def search_cheapest_alternatives(query: str):
+    """Ищем на Yandex.Market + прямые ссылки"""
+    results = []
+    search_url = f"https://market.yandex.ru/search?text={query.replace(' ', '+')}"
+    
+    headers = {"User-Agent": "Mozilla/5.0"}
+    async with aiohttp.ClientSession(headers=headers) as session:
+        try:
+            async with session.get(search_url, timeout=20) as resp:
+                soup = BeautifulSoup(await resp.text(), 'html.parser')
+                
+                # Ищем карточки товаров
+                items = soup.find_all('div', {'data-auto': 'offer'})[:6]  # топ-6
+                
+                for item in items:
+                    title_tag = item.find('a', {'data-auto': 'title'})
+                    price_tag = item.find('span', {'data-auto': 'price-value'})
+                    link_tag = title_tag
+                    
+                    if title_tag and price_tag:
+                        title = title_tag.get_text(strip=True)[:100]
+                        price_text = re.sub(r'\D', '', price_tag.get_text(strip=True))
+                        price = int(price_text) if price_text else None
+                        link = "https://market.yandex.ru" + title_tag.get('href', '')
                         
-                        async with aiosqlite.connect('food_bot.db') as db:
-                            for item in items:
-                                title = item.find(['a', 'h2', 'div'], class_=lambda x: x and any(word in str(x).lower() for word in ['title', 'name', 'text', 'cept']))
-                                if title:
-                                    text = title.get_text(strip=True)
-                                    if len(text) > 25:
-                                        await db.execute(
-                                            "INSERT OR IGNORE INTO deals (country, text, timestamp) VALUES (?, ?, ?)",
-                                            ("Россия", text[:220], today)
-                                        )
-            except:
-                continue
-
-# ===================== ОТПРАВКА АКЦИЙ =====================
-async def send_deals(user_id: int, country: str, is_premium: bool):
-    async with aiosqlite.connect('food_bot.db') as db:
-        async with db.execute("SELECT text FROM deals WHERE country = ? ORDER BY id DESC LIMIT 20", 
-                            (country,)) as cursor:
-            rows = await cursor.fetchall()
-
-    if not rows:
-        await bot.send_message(user_id, "⚠️ Пока не найдено свежих акций.\nБот продолжает поиск...")
-        return
-
-    text = f"<b>🔥 Реальные акции — {datetime.now().strftime('%d.%m.%Y')}</b>\n\n"
-    count = len(rows) if is_premium else 4
-
-    for i, (deal,) in enumerate(rows[:count], 1):
-        if is_premium or i % 4 == 0:
-            text += f"{i}️⃣ {deal}\n"
-        else:
-            text += f"{i}️⃣ |||||||||||||||||| (заблюрено)\n"
-
-    if not is_premium:
-        text += "\n\n🔒 Остальные акции доступны только по подписке 0.99$/мес"
-
-    await bot.send_message(user_id, text, parse_mode="HTML")
+                        if price:
+                            results.append({
+                                "title": title,
+                                "price": price,
+                                "link": link
+                            })
+        except Exception as e:
+            print(f"Search error: {e}")
+    
+    # Сортируем по цене
+    results.sort(key=lambda x: x["price"])
+    return results[:5]
 
 # ===================== ХЭНДЛЕРЫ =====================
 @dp.message(Command("start"))
 async def start(message: types.Message):
     await init_db()
-    await message.answer("👋 Добро пожаловать в <b>Бесплатная Еда</b>!\nТолько реальные акции.", 
-                        reply_markup=main_menu, parse_mode="HTML")
+    await message.answer(
+        "👋 Добро пожаловать в <b>CheapFinder</b>!\n\n"
+        "Кидай ссылку на товар с WB или Ozon — найду где дешевле!",
+        reply_markup=main_menu, 
+        parse_mode="HTML"
+    )
 
-@dp.message(F.text == "🔥 Акции на сегодня")
-async def today_deals(message: types.Message):
-    async with aiosqlite.connect('food_bot.db') as db:
-        async with db.execute("SELECT subscribed_until, country FROM users WHERE user_id = ?", 
-                            (message.from_user.id,)) as cursor:
-            row = await cursor.fetchone()
-            
-            is_premium = row and row[0] and datetime.fromisoformat(row[0]) > datetime.now()
-            country = row[1] if row else "Россия"
-            
-            await send_deals(message.from_user.id, country, is_premium)
+@dp.message(F.text == "🔍 Новый поиск")
+async def new_search(message: types.Message):
+    await message.answer("Отправь ссылку на товар (Wildberries или Ozon):")
 
-@dp.message(F.text == "🌍 Выбрать страну")
-async def choose_country(message: types.Message):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇷🇺 Россия", callback_data="country_Russia")],
-        [InlineKeyboardButton(text="🇧🇾 Беларусь", callback_data="country_Belarus")],
-    ])
-    await message.answer("Выбери страну:", reply_markup=kb)
+@dp.message(F.text.startswith("http"))
+async def handle_product_link(message: types.Message):
+    url = message.text.strip()
+    
+    title, current_price = await parse_product_info(url)
+    if not title:
+        return await message.answer("❌ Не удалось прочитать товар. Попробуй другую ссылку.")
 
-@dp.callback_query(F.data.startswith("country_"))
-async def set_country(callback: types.CallbackQuery):
-    country = "Россия" if callback.data == "country_Russia" else "Беларусь"
-    async with aiosqlite.connect('food_bot.db') as db:
-        await db.execute("UPDATE users SET country = ? WHERE user_id = ?", 
-                        (country, callback.from_user.id))
-        await db.commit()
-    await callback.message.edit_text(f"✅ Страна изменена на <b>{country}</b>", parse_mode="HTML")
-    await send_deals(callback.from_user.id, country, False)  # сразу показываем
-    await callback.answer()
+    await message.answer(f"🔍 Ищу лучшие цены на:\n<b>{title}</b>", parse_mode="HTML")
+    
+    alternatives = await search_cheapest_alternatives(title)
+    
+    if not alternatives:
+        return await message.answer("Не удалось найти альтернативы. Попробуй позже.")
 
-# ===================== ПОДПИСКА =====================
+    text = f"✅ Найдено {len(alternatives)} вариантов дешевле/лучше:\n\n"
+    
+    for i, alt in enumerate(alternatives, 1):
+        text += f"{i}. <b>{alt['price']} ₽</b> — <a href='{alt['link']}'>{alt['title'][:70]}...</a>\n\n"
+    
+    if current_price:
+        text += f"\nТекущая цена в источнике: {current_price} ₽"
+    
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+
+# ===================== ПОДПИСКА (оставляем) =====================
 @dp.message(F.text == "💎 Купить подписку 0.99$")
 async def buy_subscription(message: types.Message):
     prices = [types.LabeledPrice(label="Подписка 30 дней", amount=99)]
     await bot.send_invoice(
         chat_id=message.chat.id,
-        title="Подписка «Бесплатная Еда»",
-        description="Полный доступ ко всем реальным акциям",
+        title="CheapFinder Premium",
+        description="Безлимитные поиски + больше площадок",
         payload="monthly_sub",
         provider_token="",
         currency="XTR",
@@ -148,23 +159,16 @@ async def pre_checkout(query: types.PreCheckoutQuery):
 @dp.message(F.successful_payment)
 async def successful_payment(message: types.Message):
     until = (datetime.now() + timedelta(days=30)).isoformat()
-    async with aiosqlite.connect('food_bot.db') as db:
-        await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)", 
+    async with aiosqlite.connect('price_bot.db') as db:
+        await db.execute("INSERT OR REPLACE INTO users (user_id, subscribed_until) VALUES (?, ?)",
                         (message.from_user.id, until))
         await db.commit()
-    await message.answer("🎉 Подписка активирована!\nТеперь ты видишь **все** реальные акции без цензуры.")
-
-# ===================== ФОНОВЫЙ ПОИСК =====================
-async def background_search():
-    while True:
-        await parse_new_deals()
-        await asyncio.sleep(900)  # каждые 15 минут
+    await message.answer("🎉 Подписка активирована! Теперь без ограничений.")
 
 # ===================== ЗАПУСК =====================
 async def main():
     await init_db()
-    asyncio.create_task(background_search())
-    print("🚀 Бот запущен! Только реальный парсинг.")
+    print("🚀 CheapFinder Bot запущен! (поиск самых дешёвых аналогов)")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
